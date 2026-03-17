@@ -63,6 +63,7 @@ CREATE TABLE IF NOT EXISTS autocare_processed.marketing_sessions (
   location_id STRING,
   location_name STRING,
   location_is_active BOOLEAN,
+  brand STRING,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP(),
   ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP()
 )

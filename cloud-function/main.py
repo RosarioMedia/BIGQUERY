@@ -230,18 +230,20 @@ def parse_stripe_customers_batch(
                 "ingested_at": now,
             })
 
-        ls = item.get("latestSession") or {}
-        loc = item.get("latestSessionLocation") or {}
-        if ls.get("sessionId"):
+        for s in item.get("sessions") or []:
+            if not s.get("sessionId"):
+                continue
+            loc = s.get("location") or {}
             sessions.append({
-                "session_id": ls.get("sessionId"),
+                "session_id": s.get("sessionId"),
                 "client_id": cid,
-                "session_date": ls.get("sessionDate"),
-                "session_type": ls.get("sessionType"),
-                "session_description": ls.get("sessionDescription"),
+                "session_date": s.get("sessionDate"),
+                "session_type": s.get("sessionType"),
+                "session_description": s.get("sessionDescription"),
                 "location_id": loc.get("id"),
                 "location_name": loc.get("name"),
                 "location_is_active": loc.get("isActive"),
+                "brand": s.get("brand"),
                 "updated_at": now,
                 "ingested_at": now,
             })

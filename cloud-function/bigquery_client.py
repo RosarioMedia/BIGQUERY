@@ -721,7 +721,7 @@ class BigQueryClient:
                   client_id,
                   ARRAY_AGG(STRUCT(
                     session_id, session_date, session_type, session_description,
-                    location_id, location_name, location_is_active,
+                    location_id, location_name, location_is_active, brand,
                     updated_at AS session_updated_at, ingested_at AS session_ingested_at
                   ) ORDER BY session_date DESC) AS sessions
                 FROM `{p}.{acp}.marketing_sessions`

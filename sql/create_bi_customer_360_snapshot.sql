@@ -82,7 +82,8 @@ WITH
       DATE(session_date) AS latest_session_date,
       session_type      AS latest_session_type,
       session_description AS latest_session_description,
-      location_name     AS latest_session_location
+      location_name     AS latest_session_location,
+      brand             AS latest_session_brand
     FROM (
       SELECT *,
         ROW_NUMBER() OVER (
@@ -215,6 +216,7 @@ SELECT
   lses.latest_session_type,
   lses.latest_session_description,
   lses.latest_session_location,
+  lses.latest_session_brand,
 
   -- Session counts
   COALESCE(sescnt.total_sessions, 0)   AS total_sessions,

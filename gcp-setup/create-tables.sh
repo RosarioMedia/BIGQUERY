@@ -52,6 +52,8 @@ echo -e "${YELLOW}Creating AutoCare raw tables...${NC}"
 bq query --use_legacy_sql=false < "$SQL_DIR/create_autocare_raw_tables.sql"
 echo -e "${YELLOW}Creating AutoCare processed tables...${NC}"
 bq query --use_legacy_sql=false < "$SQL_DIR/create_autocare_processed_tables.sql"
+echo -e "${YELLOW}Adding brand column to marketing_sessions (if not exists)...${NC}"
+bq query --use_legacy_sql=false "ALTER TABLE ${PROJECT_ID}.autocare_processed.marketing_sessions ADD COLUMN IF NOT EXISTS brand STRING" 2>/dev/null || true
 echo -e "${YELLOW}Dropping legacy AutoCare staging tables (if exist)...${NC}"
 bq query --use_legacy_sql=false < "$SQL_DIR/drop_autocare_staging_tables.sql" 2>/dev/null || true
 echo -e "${YELLOW}Creating AutoCare metadata tables...${NC}"
