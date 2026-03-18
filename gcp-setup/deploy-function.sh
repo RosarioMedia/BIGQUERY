@@ -137,6 +137,8 @@ gcloud functions deploy $FUNCTION_NAME \
     --service-account=$SERVICE_ACCOUNT \
     --memory=$MEMORY \
     --timeout=$TIMEOUT \
+    --concurrency=1 \
+    --max-instances=1 \
     --set-env-vars "$ENV_VARS"
 
 echo ""
