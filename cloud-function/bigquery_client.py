@@ -557,6 +557,11 @@ class BigQueryClient:
         """
         p = self.project_id
         ds = self.autocare_processed_dataset
+        load_job_config = bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            ignore_unknown_values=True,
+        )
         for table_name, rows in [
             ("marketing_customers", customers),
             ("marketing_subscriptions", subscriptions),
@@ -564,17 +569,21 @@ class BigQueryClient:
             ("marketing_cars", cars),
         ]:
             table_id = f"{p}.{ds}.{table_name}"
-            try:
-                self.client.query(f"TRUNCATE TABLE `{table_id}`").result()
-            except Exception as e:
-                logger.warning(f"TRUNCATE {table_name}: {e}")
             if not rows:
+                # No data — truncate via DML (no streaming insert follows, so no timing issue)
+                try:
+                    self.client.query(f"TRUNCATE TABLE `{table_id}`").result()
+                    logger.info(f"Truncated {table_id} (0 rows to load)")
+                except Exception as e:
+                    logger.warning(f"TRUNCATE {table_name}: {e}")
                 continue
-            for i in range(0, len(rows), 500):
-                errors = self.client.insert_rows_json(table_id, rows[i : i + 500])
-                if errors:
-                    raise Exception(f"Failed to insert {table_name}: {errors}")
-            logger.info(f"Inserted {len(rows)} rows into {table_id}")
+            # Non-empty: use a load job for atomic WRITE_TRUNCATE — data is immediately
+            # visible to subsequent queries (no streaming-buffer delay after TRUNCATE)
+            load_job = self.client.load_table_from_json(rows, table_id, job_config=load_job_config)
+            load_job.result()
+            if load_job.errors:
+                raise Exception(f"Failed to load {table_name}: {load_job.errors}")
+            logger.info(f"Loaded {len(rows)} rows into {table_id} (WRITE_TRUNCATE)")
 
     def update_autocare_sync_metadata(
         self,
