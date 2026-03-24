@@ -1,0 +1,172 @@
+name: Deploy to GCP
+
+on:
+  push:
+    branches: [main]
+
+env:
+  PROJECT_ID: hitech-484412
+  REGION: us-central1
+  FUNCTION_NAME: stripe-bigquery-sync
+  RUNTIME_SA: stripe-sync-sa@hitech-484412.iam.gserviceaccount.com
+
+jobs:
+  # ── Detect which paths changed ───────────────────────────────────────────────
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      function: ${{ steps.filter.outputs.function }}
+      sql: ${{ steps.filter.outputs.sql }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            function:
+              - 'cloud-function/**'
+            sql:
+              - 'sql/**'
+
+  # ── Deploy Cloud Function ─────────────────────────────────────────────────────
+  # Triggers when anything in cloud-function/ changes.
+  # Only GOOGLE_CLOUD_PROJECT is baked in as an env var — all other secrets
+  # (Stripe key, AutoCare creds, webhook secret) are read from Secret Manager at runtime.
+  deploy-function:
+    needs: changes
+    if: needs.changes.outputs.function == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy BI snapshot SQL into cloud-function/sql/
+        run: |
+          mkdir -p cloud-function/sql
+          cp sql/create_bi_customer_360_snapshot.sql cloud-function/sql/
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy Cloud Function
+        run: |
+          gcloud functions deploy ${{ env.FUNCTION_NAME }} \
+            --gen2 \
+            --runtime=python311 \
+            --region=${{ env.REGION }} \
+            --source=cloud-function \
+            --entry-point=sync_handler \
+            --trigger-http \
+            --allow-unauthenticated \
+            --service-account=${{ env.RUNTIME_SA }} \
+            --memory=2GB \
+            --timeout=540s \
+            --concurrency=1 \
+            --max-instances=1 \
+            --set-env-vars="GOOGLE_CLOUD_PROJECT=${{ env.PROJECT_ID }}" \
+            --project=${{ env.PROJECT_ID }}
+
+  # ── Run BigQuery DDL ──────────────────────────────────────────────────────────
+  # Triggers when anything in sql/ changes.
+  # All SQL files use CREATE ... IF NOT EXISTS — safe to re-run at any time.
+  # Note: create_unified_customer_view.sql is excluded because it contains a
+  # PROJECT_ID placeholder that must be substituted manually (one-time operation).
+  deploy-tables:
+    needs: changes
+    if: needs.changes.outputs.sql == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Create BigQuery datasets (idempotent)
+        run: |
+          for dataset in stripe_metadata stripe_raw stripe_processed \
+                         autocare_raw autocare_processed autocare_metadata \
+                         unified bi promoapp; do
+            bq mk --project_id=${{ env.PROJECT_ID }} -d "$dataset" 2>/dev/null || true
+          done
+
+      - name: Run all DDL SQL files
+        run: |
+          for sql_file in \
+            sql/create_metadata_tables.sql \
+            sql/create_raw_tables.sql \
+            sql/create_processed_tables.sql \
+            sql/create_autocare_raw_tables.sql \
+            sql/create_autocare_processed_tables.sql \
+            sql/create_autocare_metadata_tables.sql \
+            sql/drop_autocare_staging_tables.sql \
+            sql/create_promoapp_tables.sql; do
+            echo "--- Running $sql_file ---"
+            bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < "$sql_file"
+          done
+
+      - name: Add brand column to marketing_sessions if missing
+        run: |
+          bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} \
+            "ALTER TABLE hitech-484412.autocare_processed.marketing_sessions \
+             ADD COLUMN IF NOT EXISTS brand STRING" 2>/dev/null || true
+
+  # ── DISABLED: Cloud Run Job deploy ───────────────────────────────────────────
+  # The Cloud Run Job (cloud-function/job.py) is an alternative entrypoint for
+  # long-running AutoCare streaming syncs (~1.5h, 700k+ records) that exceed the
+  # Cloud Function's 540s timeout. It is NOT currently deployed.
+  #
+  # To re-enable:
+  #   1. Add GitHub secret: STRIPE_FUNCTION_URL (the deployed Cloud Function URL)
+  #   2. Uncomment the job below
+  #   3. Add IMAGE and JOB_NAME back to the top-level env block:
+  #        JOB_NAME: autocare-sync-job
+  #        IMAGE: us-central1-docker.pkg.dev/hitech-484412/autocare-sync/autocare-sync-job:latest
+  #   4. Ensure the Artifact Registry repo 'autocare-sync' exists in hitech-484412
+  #
+  # deploy-job:
+  #   needs: changes
+  #   if: needs.changes.outputs.function == 'true'
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Copy BI snapshot SQL into cloud-function/sql/
+  #       run: |
+  #         mkdir -p cloud-function/sql
+  #         cp sql/create_bi_customer_360_snapshot.sql cloud-function/sql/
+  #     - name: Authenticate to GCP
+  #       uses: google-github-actions/auth@v2
+  #       with:
+  #         credentials_json: ${{ secrets.GCP_SA_KEY }}
+  #     - name: Set up gcloud CLI
+  #       uses: google-github-actions/setup-gcloud@v2
+  #     - name: Build and push Docker image via Cloud Build
+  #       run: |
+  #         gcloud builds submit cloud-function \
+  #           --tag="${{ env.IMAGE }}" \
+  #           --project=${{ env.PROJECT_ID }}
+  #     - name: Create or update Cloud Run Job
+  #       run: |
+  #         DEPLOY_ARGS=(
+  #           "--image=${{ env.IMAGE }}"
+  #           "--region=${{ env.REGION }}"
+  #           "--service-account=${{ env.RUNTIME_SA }}"
+  #           "--memory=1Gi" "--cpu=1" "--task-timeout=10800s" "--max-retries=1"
+  #           "--set-env-vars=GOOGLE_CLOUD_PROJECT=${{ env.PROJECT_ID }},STRIPE_FUNCTION_URL=${{ secrets.STRIPE_FUNCTION_URL }}"
+  #           "--project=${{ env.PROJECT_ID }}"
+  #         )
+  #         if gcloud run jobs describe autocare-sync-job \
+  #              --region=${{ env.REGION }} --project=${{ env.PROJECT_ID }} &>/dev/null; then
+  #           gcloud run jobs update autocare-sync-job "${DEPLOY_ARGS[@]}"
+  #         else
+  #           gcloud run jobs create autocare-sync-job "${DEPLOY_ARGS[@]}"
+  #         fi
