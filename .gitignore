@@ -43,6 +43,7 @@ env/
 
 # Deploy-time copy of BI SQL (single source is sql/create_bi_customer_360_snapshot.sql)
 cloud-function/sql/create_bi_customer_360_snapshot.sql
+gcp-setup/github-actions-key.json
 
 # Output files
 *.csv
