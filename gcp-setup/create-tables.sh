@@ -68,6 +68,14 @@ bq mk -d bi 2>/dev/null || true
 echo -e "${GREEN}✓ unified, bi datasets ready${NC}"
 echo ""
 
+# PromoApp dataset and tables (populated by external PromoApp API)
+echo -e "${YELLOW}Creating promoapp dataset (if not exist)...${NC}"
+bq mk -d promoapp 2>/dev/null || true
+echo -e "${YELLOW}Creating promoapp tables...${NC}"
+bq query --use_legacy_sql=false < "$SQL_DIR/create_promoapp_tables.sql"
+echo -e "${GREEN}✓ PromoApp tables created${NC}"
+echo ""
+
 echo -e "${GREEN}=========================================="
 echo "All BigQuery Tables Created!"
 echo "==========================================${NC}"
@@ -86,6 +94,7 @@ echo "  bi: (unified_customer_360_snapshot populated by Cloud Function)"
 echo "  autocare_raw: tiers_raw, marketing_data_raw, stripe_customers_raw"
 echo "  autocare_processed: tiers, marketing_customers, marketing_subscriptions, marketing_sessions, marketing_cars"
 echo "  autocare_metadata: sync_history"
+echo "  promoapp: leads"
 echo ""
 echo "To create unified_customers view (required before first sync with unified/BI):"
 echo "  1. Replace PROJECT_ID in sql/create_unified_customer_view.sql with $PROJECT_ID"
