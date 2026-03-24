@@ -12,7 +12,6 @@ When called by the AutoCare Cloud Run Job after it finishes, it passes
 {"skip_autocare": true} so the function only handles Stripe + unified/BI.
 """
 
-# test comment
 import json
 import os
 import functions_framework
