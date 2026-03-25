@@ -109,7 +109,8 @@ jobs:
             sql/create_autocare_processed_tables.sql \
             sql/create_autocare_metadata_tables.sql \
             sql/drop_autocare_staging_tables.sql \
-            sql/create_promoapp_tables.sql; do
+            sql/create_promoapp_tables.sql \
+            sql/alter_leads_add_stripe_columns.sql; do
             echo "--- Running $sql_file ---"
             bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < "$sql_file"
           done
