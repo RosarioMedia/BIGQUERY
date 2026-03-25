@@ -36,6 +36,8 @@ class BigQueryClient:
         # Unified and BI datasets (updated after all syncs)
         self.unified_dataset = 'unified'
         self.bi_dataset = 'bi'
+        # PromoApp dataset (leads enriched with Stripe data after sync)
+        self.promoapp_dataset = 'promoapp'
 
         logger.info(f"Initialized BigQuery client for project: {self.project_id}")
     
@@ -613,6 +615,143 @@ class BigQueryClient:
             logger.error(f"Errors updating AutoCare sync metadata: {errors}")
         else:
             logger.info(f"Updated AutoCare sync metadata for {entity_type}")
+
+    # ---------- Leads enrichment (match promoapp.leads to Stripe data) ----------
+
+    def update_leads_with_stripe_data(self) -> Dict[str, Any]:
+        """
+        Match promoapp.leads to stripe_processed.customers (by email, phone fallback)
+        and write subscription details back into the leads table via MERGE.
+
+        Only subscriptions created AFTER the lead's createdAt are eligible, so
+        pre-existing Stripe subscriptions are never attributed to newer leads.
+        """
+        p = self.project_id
+        sp = self.processed_dataset
+        pa = self.promoapp_dataset
+
+        merge_query = f"""
+        MERGE `{p}.{pa}.leads` AS target
+        USING (
+          WITH lead_customer_match AS (
+            -- Match leads to Stripe customers: email first, phone fallback.
+            -- ROW_NUMBER deduplicates when one lead matches multiple Stripe customers.
+            SELECT * FROM (
+              SELECT
+                l.uuid,
+                l.createdAt          AS lead_created_at,
+                c.customer_id,
+                c.created            AS stripe_customer_created,
+                'email'              AS matched_on,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.uuid
+                  ORDER BY c.created DESC
+                ) AS rn
+              FROM `{p}.{pa}.leads` l
+              INNER JOIN `{p}.{sp}.customers` c
+                ON LOWER(TRIM(l.email)) = LOWER(TRIM(c.email))
+              WHERE l.email IS NOT NULL AND TRIM(l.email) != ''
+                AND c.email IS NOT NULL AND TRIM(c.email) != ''
+
+              UNION ALL
+
+              SELECT
+                l.uuid,
+                l.createdAt          AS lead_created_at,
+                c.customer_id,
+                c.created            AS stripe_customer_created,
+                'phone'              AS matched_on,
+                ROW_NUMBER() OVER (
+                  PARTITION BY l.uuid
+                  ORDER BY c.created DESC
+                ) AS rn
+              FROM `{p}.{pa}.leads` l
+              INNER JOIN `{p}.{sp}.customers` c
+                ON TRIM(l.phone) = TRIM(c.phone)
+              WHERE (l.email IS NULL OR TRIM(l.email) = '')
+                AND l.phone IS NOT NULL AND TRIM(l.phone) != ''
+                AND c.phone IS NOT NULL AND TRIM(c.phone) != ''
+            )
+            WHERE rn = 1
+          ),
+
+          lead_eligible_subs AS (
+            -- Only subscriptions created AFTER the lead
+            SELECT
+              lcm.uuid,
+              sub.subscription_id,
+              sub.status,
+              sub.plan_name,
+              sub.product_id,
+              sub.amount,
+              sub.currency,
+              sub.subscription_interval,
+              sub.current_period_start,
+              sub.current_period_end,
+              sub.created AS sub_created,
+              ROW_NUMBER() OVER (
+                PARTITION BY lcm.uuid
+                ORDER BY
+                  CASE WHEN sub.status = 'active' THEN 0 ELSE 1 END,
+                  sub.created DESC
+              ) AS rn
+            FROM lead_customer_match lcm
+            INNER JOIN `{p}.{sp}.subscriptions` sub
+              ON sub.customer_id = lcm.customer_id
+            WHERE sub.created > lcm.lead_created_at
+          ),
+
+          lead_best_sub AS (
+            SELECT * FROM lead_eligible_subs WHERE rn = 1
+          ),
+
+          enriched AS (
+            SELECT
+              lcm.uuid,
+              lcm.customer_id,
+              lcm.stripe_customer_created,
+              lcm.matched_on,
+              bs.subscription_id,
+              bs.status              AS subscription_status,
+              bs.plan_name,
+              bs.product_id,
+              bs.amount,
+              bs.currency,
+              bs.subscription_interval,
+              bs.current_period_start,
+              bs.current_period_end
+            FROM lead_customer_match lcm
+            LEFT JOIN lead_best_sub bs ON bs.uuid = lcm.uuid
+          )
+
+          SELECT * FROM enriched
+        ) AS source
+        ON target.uuid = source.uuid
+        WHEN MATCHED THEN UPDATE SET
+          target.stripe_customer_id            = source.customer_id,
+          target.stripe_customer_created       = source.stripe_customer_created,
+          target.stripe_subscription_id        = source.subscription_id,
+          target.stripe_subscription_status    = source.subscription_status,
+          target.stripe_plan_name              = source.plan_name,
+          target.stripe_product_id             = source.product_id,
+          target.stripe_amount                 = source.amount,
+          target.stripe_currency               = source.currency,
+          target.stripe_subscription_interval  = source.subscription_interval,
+          target.stripe_current_period_start   = source.current_period_start,
+          target.stripe_current_period_end     = source.current_period_end,
+          target.stripe_matched_at             = CURRENT_TIMESTAMP(),
+          target.stripe_matched_on             = source.matched_on
+        """
+
+        try:
+            job = self.client.query(merge_query)
+            result = job.result()
+            rows_affected = job.num_dml_affected_rows or 0
+            logger.info(f"Leads enrichment: {rows_affected} leads updated with Stripe data")
+            return {"status": "success", "leads_updated": rows_affected}
+        except Exception as e:
+            logger.error(f"Failed to update leads with Stripe data: {e}", exc_info=True)
+            return {"status": "failed", "error": str(e), "leads_updated": 0}
 
     # ---------- Unified and BI tables (run after all Stripe + AutoCare syncs) ----------
 

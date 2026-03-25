@@ -109,6 +109,20 @@ def sync_handler(request: Request) -> tuple[str, int]:
                 }
                 overall_success = False
 
+        # Enrich promoapp.leads with Stripe customer/subscription data
+        try:
+            logger.info("\n--- Enriching leads with Stripe data ---")
+            leads_result = bq_client.update_leads_with_stripe_data()
+            results['leads_enrichment'] = leads_result
+            if leads_result.get('status') != 'success':
+                overall_success = False
+            else:
+                logger.info(f"  ✓ {leads_result.get('leads_updated', 0)} leads enriched")
+        except Exception as e:
+            logger.error(f"Leads enrichment failed: {e}", exc_info=True)
+            results['leads_enrichment'] = {'status': 'failed', 'error': str(e), 'leads_updated': 0}
+            overall_success = False
+
         # Update unified tables after all Stripe and AutoCare syncing is done
         try:
             logger.info("\n--- Updating unified tables (unified.customers + BI snapshot) ---")
