@@ -3,6 +3,7 @@ name: Deploy to GCP
 on:
   push:
     branches: [main]
+  workflow_dispatch:  # manual re-run from Actions tab (e.g. re-apply BQ migrations)
 
 env:
   PROJECT_ID: hitech-484412
@@ -28,6 +29,7 @@ jobs:
               - 'cloud-function/**'
             sql:
               - 'sql/**'
+              - '.github/workflows/deploy.yml'
 
   # ── Deploy Cloud Function ─────────────────────────────────────────────────────
   # Triggers when anything in cloud-function/ changes.
@@ -78,7 +80,8 @@ jobs:
   # PROJECT_ID placeholder that must be substituted manually (one-time operation).
   deploy-tables:
     needs: changes
-    if: needs.changes.outputs.sql == 'true'
+    # Run when sql/** or workflow file changes, or when manually triggered (re-apply migrations).
+    if: needs.changes.outputs.sql == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -109,11 +112,17 @@ jobs:
             sql/create_autocare_processed_tables.sql \
             sql/create_autocare_metadata_tables.sql \
             sql/drop_autocare_staging_tables.sql \
-            sql/create_promoapp_tables.sql \
-            sql/alter_leads_add_stripe_columns.sql; do
+            sql/create_promoapp_tables.sql; do
             echo "--- Running $sql_file ---"
             bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < "$sql_file"
           done
+
+      # Dedicated step so logs always show this migration (CREATE TABLE IF NOT EXISTS
+      # does not add columns to an existing promoapp.leads — only ALTER does).
+      - name: Migrate promoapp.leads — add Stripe columns
+        run: |
+          echo "--- Running sql/alter_leads_add_stripe_columns.sql ---"
+          bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < sql/alter_leads_add_stripe_columns.sql
 
       - name: Add brand column to marketing_sessions if missing
         run: |

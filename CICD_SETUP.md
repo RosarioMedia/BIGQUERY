@@ -1,6 +1,6 @@
 # CI/CD Setup Guide
 
-GitHub Actions pipeline that auto-deploys the Cloud Function and BigQuery DDL when you push to `main`.
+GitHub Actions pipeline that auto-deploys the Cloud Function and BigQuery DDL when you push to `main`. You can also run it manually: **Actions → Deploy to GCP → Run workflow**.
 
 **GCP Project:** `hitech-484412`
 
@@ -12,7 +12,9 @@ GitHub Actions pipeline that auto-deploys the Cloud Function and BigQuery DDL wh
 |---|---|
 | Anything in `cloud-function/` | Cloud Function (`stripe-bigquery-sync`) |
 | Anything in `sql/` | BigQuery DDL (all `sql/*.sql` files, idempotent) |
-| Only `docs/`, `*.md`, `gcp-setup/` | Nothing — pipeline skips all jobs |
+| Changes to `.github/workflows/deploy.yml` | BigQuery DDL job runs (workflow is in the `sql` path filter so CI fixes apply) |
+| Manual **Run workflow** | BigQuery DDL job always runs (re-apply migrations without editing `sql/`) |
+| Only `docs/`, `*.md`, `gcp-setup/` (and no workflow/sql/cloud-function change) | Nothing — pipeline skips all jobs |
 
 The Cloud Run Job (`cloud-function/job.py`) is **not deployed by CI/CD** — it exists in the codebase as a fallback for long-running AutoCare syncs but is not currently in use. It is kept commented-out in `deploy.yml` for easy re-activation if needed.
 
@@ -111,6 +113,8 @@ Runs these SQL files in order (all use `CREATE ... IF NOT EXISTS` — safe to re
 7. `sql/drop_autocare_staging_tables.sql`
 8. `sql/create_promoapp_tables.sql`
 
+Then a **separate step** runs `sql/alter_leads_add_stripe_columns.sql` so it always appears in the Actions log. `CREATE TABLE IF NOT EXISTS` does not add columns to an existing table; only this ALTER migration does.
+
 **Not run by CI:** `sql/create_unified_customer_view.sql` — this file contains a `PROJECT_ID` placeholder that must be substituted manually. Run it once:
 
 ```bash
@@ -121,6 +125,23 @@ sed 's/PROJECT_ID/hitech-484412/g' sql/create_unified_customer_view.sql | \
 ---
 
 ## Troubleshooting
+
+**I pushed to `main` but BigQuery did not change (e.g. `promoapp.leads` has no new columns)**
+
+1. **Check whether `deploy-tables` ran or was skipped**  
+   In GitHub → **Actions** → open the workflow run → look for the job **Run BigQuery DDL** (`deploy-tables`).  
+   - If it says **Skipped** (grey): nothing in `sql/**` changed in that push, so **no DDL ran**. Only `deploy-function` or nothing may have run.  
+   - **Fix:** Push a change under `sql/` (e.g. touch `sql/.gitkeep` or re-run migration), or run the migration manually:  
+     `bq query --use_legacy_sql=false --project_id=hitech-484412 < sql/alter_leads_add_stripe_columns.sql`
+
+2. **Confirm you are in the right GCP project**  
+   The pipeline always targets **`hitech-484412`**. In the BigQuery UI, select that project; otherwise you will not see updates.
+
+3. **`CREATE TABLE IF NOT EXISTS` does not alter existing tables**  
+   New columns come from **`sql/alter_leads_add_stripe_columns.sql`**. If `deploy-tables` never ran after that file was added, the table stays unchanged until you run that step or the SQL file manually.
+
+4. **Job failed mid-loop**  
+   If **Run all DDL SQL files** failed on an earlier file, later files (including `alter_leads_add_stripe_columns.sql`) never ran. Open the failed step log and fix the reported error.
 
 **Job fails with "permission denied" on `gcloud functions deploy`**
 → The `github-actions-sa` needs `roles/iam.serviceAccountUser` on `stripe-sync-sa`. Re-run `create-github-actions-sa.sh`.
