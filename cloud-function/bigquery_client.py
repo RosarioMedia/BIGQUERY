@@ -623,8 +623,11 @@ class BigQueryClient:
         Match promoapp.leads to stripe_processed.customers (by email, phone fallback)
         and write subscription details back into the leads table via MERGE.
 
-        Only subscriptions created AFTER the lead's createdAt are eligible, so
-        pre-existing Stripe subscriptions are never attributed to newer leads.
+        Only subscriptions created AFTER the lead's createdAt are eligible when
+        createdAt is set, so pre-existing Stripe subscriptions are not attributed
+        to newer leads. If createdAt is NULL, all subscriptions for the customer are
+        considered (ranked active first, then newest) — otherwise every sub fails
+        the ``sub.created > NULL`` filter and only customer-level fields populate.
         """
         p = self.project_id
         sp = self.processed_dataset
@@ -698,7 +701,8 @@ class BigQueryClient:
             FROM lead_customer_match lcm
             INNER JOIN `{p}.{sp}.subscriptions` sub
               ON sub.customer_id = lcm.customer_id
-            WHERE sub.created > lcm.lead_created_at
+            WHERE lcm.lead_created_at IS NULL
+               OR sub.created > lcm.lead_created_at
           ),
 
           lead_best_sub AS (
