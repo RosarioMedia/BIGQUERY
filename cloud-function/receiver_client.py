@@ -4,15 +4,21 @@ Transforms Stripe customers into GHL format (customer_id, email, name, phone, pr
 and sends to POST /api/webhooks/new-customers.
 URL and secret are read from env vars or GCP Secret Manager (replit-webhook-url, replit-webhook-secret).
 
-Also POSTs enriched promoapp.leads rows to two optional Replit backends (same env/secret names as
-replit-conversion-webhook-* in Secret Manager).
+Also POSTs enriched promoapp.leads to two backends. Expected body: {"leads": [...]} with camelCase
+fields per API contract. Full URL (including path) must be stored in secrets — e.g.:
+
+  - https://lead-generation-flow.replit.app/api/sync/bigquery-enrichment
+  - https://promoapp.tech/api/sync/bigquery-enrichment
+
+Headers: Content-Type: application/json, Authorization: Bearer <secret>.
+(Secret Manager: replit-conversion-webhook-{1,2}-url / -secret.)
 """
 import os
 import logging
 import requests
 from decimal import Decimal
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -218,50 +224,52 @@ def get_conversion_webhook_configs() -> List[Tuple[str, str, int]]:
     return out
 
 
-def preload_replit_conversion_webhook_env() -> None:
-    """
-    Load REPLIT_CONVERSION_WEBHOOK_{1,2}_URL/_SECRET from Secret Manager into os.environ
-    when missing, so configuration is fixed before Stripe/AutoCare sync and leads MERGE.
-    """
-    for idx in (1, 2):
-        url_env = f"REPLIT_CONVERSION_WEBHOOK_{idx}_URL"
-        sec_env = f"REPLIT_CONVERSION_WEBHOOK_{idx}_SECRET"
-        if os.getenv(url_env) and os.getenv(sec_env):
-            continue
-        u, s = _get_conversion_webhook_pair(idx)
-        if u and not os.getenv(url_env):
-            os.environ[url_env] = u
-        if s and not os.getenv(sec_env):
-            os.environ[sec_env] = s
-
-
-def _lead_row_json_safe(row: Dict[str, Any]) -> Dict[str, Any]:
-    """Serialize BigQuery row values for JSON POST."""
-    out: Dict[str, Any] = {}
-    for k, v in row.items():
-        if v is None:
-            out[k] = None
-        elif isinstance(v, Decimal):
-            out[k] = float(v)
-        elif hasattr(v, "isoformat") and callable(v.isoformat):
-            try:
-                out[k] = v.isoformat()
-            except (TypeError, AttributeError):
-                out[k] = v
+def _datetime_to_iso_z(v: Any) -> Optional[str]:
+    """BigQuery timestamps → ISO-8601 UTC strings with millisecond precision and Z suffix."""
+    if v is None:
+        return None
+    if isinstance(v, datetime):
+        dt = v
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
         else:
-            out[k] = v
-    return out
+            dt = dt.astimezone(timezone.utc)
+        ms = dt.microsecond // 1000
+        return dt.strftime("%Y-%m-%dT%H:%M:%S") + f".{ms:03d}Z"
+    return None
+
+
+def _lead_row_to_bigquery_enrichment_api(row: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Map promoapp.leads BigQuery row (snake_case) to PromoApp /sync/bigquery-enrichment JSON shape.
+    """
+    amt = row.get("stripe_amount")
+    if amt is not None and isinstance(amt, Decimal):
+        amt = float(amt)
+    return {
+        "uuid": row.get("uuid"),
+        "stripeCustomerId": row.get("stripe_customer_id"),
+        "stripeCustomerCreated": _datetime_to_iso_z(row.get("stripe_customer_created")),
+        "stripeSubscriptionId": row.get("stripe_subscription_id"),
+        "stripeSubscriptionStatus": row.get("stripe_subscription_status"),
+        "stripePlanName": row.get("stripe_plan_name"),
+        "stripeProductId": row.get("stripe_product_id"),
+        "stripeAmount": amt,
+        "stripeCurrency": row.get("stripe_currency"),
+        "stripeSubscriptionInterval": row.get("stripe_subscription_interval"),
+        "stripeCurrentPeriodStart": _datetime_to_iso_z(row.get("stripe_current_period_start")),
+        "stripeCurrentPeriodEnd": _datetime_to_iso_z(row.get("stripe_current_period_end")),
+        "stripeMatchedAt": _datetime_to_iso_z(row.get("stripe_matched_at")),
+        "stripeMatchedOn": row.get("stripe_matched_on"),
+    }
 
 
 def _post_leads_enrichment_payload(url: str, secret: str, leads: List[Dict[str, Any]]) -> bool:
     payload = {
-        "event": "leads_enriched",
-        "sent_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
-        "leads": [_lead_row_json_safe(lead) for lead in leads],
+        "leads": [_lead_row_to_bigquery_enrichment_api(lead) for lead in leads],
     }
     headers = {
         "Content-Type": "application/json",
-        HEADER_SECRET: secret,
         "Authorization": f"Bearer {secret}",
     }
     try:
@@ -277,7 +285,8 @@ def _post_leads_enrichment_payload(url: str, secret: str, leads: List[Dict[str, 
 
 def notify_replit_enriched_leads(leads: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    POST enriched lead rows to each configured Replit app (same payload to both URLs).
+    POST {"leads": [...]} to each configured backend (camelCase fields per bigquery-enrichment API).
+    Headers: Content-Type application/json, Authorization Bearer <secret>.
     Failures are per-app; one failing backend does not skip the other.
 
     Configure REPLIT_CONVERSION_WEBHOOK_1_URL/_SECRET and/or _2_* (or Secret Manager

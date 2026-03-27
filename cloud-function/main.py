@@ -22,10 +22,10 @@ from typing import Dict, List, Tuple, Any
 
 from stripe_client import StripeClient
 from bigquery_client import BigQueryClient
+from secrets_env import preload_cloud_function_secrets_from_secret_manager
 from receiver_client import (
     build_ghl_customers,
     send_new_customers,
-    preload_replit_conversion_webhook_env,
     notify_replit_enriched_leads,
 )
 
@@ -51,11 +51,13 @@ def sync_handler(request: Request) -> tuple[str, int]:
         Tuple of (response_message, http_status_code)
     """
     try:
+        preload_cloud_function_secrets_from_secret_manager()
+
         logger.info("=" * 60)
         logger.info("Starting Stripe to BigQuery sync")
         logger.info(f"Triggered at: {datetime.utcnow().isoformat()}")
         logger.info("=" * 60)
-        
+
         # Parse request parameters
         request_json = request.get_json(silent=True) or {}
         entities = request_json.get('entities')
@@ -71,8 +73,6 @@ def sync_handler(request: Request) -> tuple[str, int]:
 
         if skip_autocare:
             logger.info("skip_autocare=true — AutoCare sync handled by Cloud Run Job, skipping here")
-
-        preload_replit_conversion_webhook_env()
 
         # Initialize clients
         stripe_client = StripeClient()
