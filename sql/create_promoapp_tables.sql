@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS promoapp.leads (
   stripe_current_period_start TIMESTAMP,
   stripe_current_period_end TIMESTAMP,
   stripe_matched_at TIMESTAMP,
-  stripe_matched_on STRING               -- 'email' or 'phone'
+  stripe_matched_on STRING,              -- 'email' or 'phone'
+
+  -- Replit apps: set when conversion webhook POST succeeded (one timestamp per app)
+  replit_conversion_webhook_1_sent_at TIMESTAMP,
+  replit_conversion_webhook_2_sent_at TIMESTAMP
 )
 PARTITION BY DATE(createdAt)
 CLUSTER BY uuid, email, brandName

@@ -75,6 +75,8 @@ echo -e "${YELLOW}Creating promoapp tables...${NC}"
 bq query --use_legacy_sql=false < "$SQL_DIR/create_promoapp_tables.sql"
 echo -e "${YELLOW}Adding Stripe enrichment columns to leads (if not exist)...${NC}"
 bq query --use_legacy_sql=false < "$SQL_DIR/alter_leads_add_stripe_columns.sql"
+echo -e "${YELLOW}Adding Replit webhook tracking columns to leads (if not exist)...${NC}"
+bq query --use_legacy_sql=false < "$SQL_DIR/alter_leads_add_replit_webhook_columns.sql"
 echo -e "${GREEN}✓ PromoApp tables created${NC}"
 echo ""
 

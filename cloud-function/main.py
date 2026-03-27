@@ -22,7 +22,12 @@ from typing import Dict, List, Tuple, Any
 
 from stripe_client import StripeClient
 from bigquery_client import BigQueryClient
-from receiver_client import build_ghl_customers, send_new_customers
+from receiver_client import (
+    build_ghl_customers,
+    send_new_customers,
+    preload_replit_conversion_webhook_env,
+    notify_replit_enriched_leads,
+)
 
 try:
     from autocare_client import AutoCareClient
@@ -66,6 +71,8 @@ def sync_handler(request: Request) -> tuple[str, int]:
 
         if skip_autocare:
             logger.info("skip_autocare=true — AutoCare sync handled by Cloud Run Job, skipping here")
+
+        preload_replit_conversion_webhook_env()
 
         # Initialize clients
         stripe_client = StripeClient()
@@ -120,8 +127,22 @@ def sync_handler(request: Request) -> tuple[str, int]:
                 logger.info(f"  ✓ {leads_result.get('leads_updated', 0)} leads enriched")
         except Exception as e:
             logger.error(f"Leads enrichment failed: {e}", exc_info=True)
-            results['leads_enrichment'] = {'status': 'failed', 'error': str(e), 'leads_updated': 0}
+            results['leads_enrichment'] = {
+                'status': 'failed',
+                'error': str(e),
+                'leads_updated': 0,
+                'enriched_leads': [],
+            }
             overall_success = False
+
+        # POST enriched leads to configured Replit backends (optional; does not fail the sync)
+        try:
+            logger.info("\n--- Notifying Replit apps (enriched leads) ---")
+            enriched = results.get('leads_enrichment', {}).get('enriched_leads') or []
+            results['replit_leads_webhook'] = notify_replit_enriched_leads(enriched)
+        except Exception as e:
+            logger.error(f"Replit leads webhooks failed: {e}", exc_info=True)
+            results['replit_leads_webhook'] = {'status': 'failed', 'error': str(e)}
 
         # Update unified tables after all Stripe and AutoCare syncing is done
         try:

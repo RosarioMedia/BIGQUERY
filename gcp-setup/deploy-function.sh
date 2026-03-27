@@ -54,6 +54,10 @@ _load_secret "autocare-api-email"    AUTOCARE_API_EMAIL
 _load_secret "autocare-api-password" AUTOCARE_API_PASSWORD
 _load_secret "replit-webhook-url"    REPLIT_WEBHOOK_URL
 _load_secret "replit-webhook-secret" REPLIT_WEBHOOK_SECRET
+_load_secret "replit-conversion-webhook-1-url"     REPLIT_CONVERSION_WEBHOOK_1_URL
+_load_secret "replit-conversion-webhook-1-secret" REPLIT_CONVERSION_WEBHOOK_1_SECRET
+_load_secret "replit-conversion-webhook-2-url"     REPLIT_CONVERSION_WEBHOOK_2_URL
+_load_secret "replit-conversion-webhook-2-secret" REPLIT_CONVERSION_WEBHOOK_2_SECRET
 
 echo ""
 echo -e "${BLUE}━━━━ Credentials resolved for this deployment ━━━━━━━━━━━━━━━━${NC}"
@@ -124,6 +128,9 @@ ENV_VARS="GOOGLE_CLOUD_PROJECT=$PROJECT_ID"
 [ -n "$REPLIT_URL" ] && [ -n "$REPLIT_SECRET" ] && ENV_VARS="$ENV_VARS,REPLIT_WEBHOOK_URL=$REPLIT_URL,REPLIT_WEBHOOK_SECRET=$REPLIT_SECRET"
 # AutoCare API (required to populate autocare_* tables; set before running this script to include them)
 [ -n "$AUTOCARE_API_EMAIL" ] && [ -n "$AUTOCARE_API_PASSWORD" ] && ENV_VARS="$ENV_VARS,AUTOCARE_API_EMAIL=$AUTOCARE_API_EMAIL,AUTOCARE_API_PASSWORD=$AUTOCARE_API_PASSWORD"
+# Optional: POST converted leads to two Replit backends (also readable from Secret Manager at runtime if unset)
+[ -n "$REPLIT_CONVERSION_WEBHOOK_1_URL" ] && [ -n "$REPLIT_CONVERSION_WEBHOOK_1_SECRET" ] && ENV_VARS="$ENV_VARS,REPLIT_CONVERSION_WEBHOOK_1_URL=$REPLIT_CONVERSION_WEBHOOK_1_URL,REPLIT_CONVERSION_WEBHOOK_1_SECRET=$REPLIT_CONVERSION_WEBHOOK_1_SECRET"
+[ -n "$REPLIT_CONVERSION_WEBHOOK_2_URL" ] && [ -n "$REPLIT_CONVERSION_WEBHOOK_2_SECRET" ] && ENV_VARS="$ENV_VARS,REPLIT_CONVERSION_WEBHOOK_2_URL=$REPLIT_CONVERSION_WEBHOOK_2_URL,REPLIT_CONVERSION_WEBHOOK_2_SECRET=$REPLIT_CONVERSION_WEBHOOK_2_SECRET"
 
 # Deploy the function
 gcloud functions deploy $FUNCTION_NAME \

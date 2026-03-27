@@ -3,10 +3,14 @@ Client to POST new Stripe customers to GoHighLevel (Replit) webhook.
 Transforms Stripe customers into GHL format (customer_id, email, name, phone, product_id)
 and sends to POST /api/webhooks/new-customers.
 URL and secret are read from env vars or GCP Secret Manager (replit-webhook-url, replit-webhook-secret).
+
+Also POSTs enriched promoapp.leads rows to two optional Replit backends (same env/secret names as
+replit-conversion-webhook-* in Secret Manager).
 """
 import os
 import logging
 import requests
+from decimal import Decimal
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
 
@@ -20,6 +24,12 @@ MAX_CUSTOMERS_PER_REQUEST = 10_000
 # Secret Manager secret names (used when env vars are not set)
 SECRET_NAME_WEBHOOK_URL = "replit-webhook-url"
 SECRET_NAME_WEBHOOK_SECRET = "replit-webhook-secret"
+
+# Optional: two Replit backends notified after promoapp.leads MERGE (rows that actually changed)
+# Env: REPLIT_CONVERSION_WEBHOOK_1_URL / _SECRET, REPLIT_CONVERSION_WEBHOOK_2_URL / _SECRET
+# Or Secret Manager: replit-conversion-webhook-{1,2}-url / -secret
+REPLIT_LEADS_WEBHOOK_TIMEOUT_S = 120
+MAX_LEADS_PER_REPLIT_REQUEST = 500
 
 
 def _get_webhook_config() -> Tuple[Optional[str], Optional[str]]:
@@ -161,3 +171,146 @@ def send_new_customers(
 
     logger.info(f"Sent {total_sent} new customers to receiver: {url}")
     return True
+
+
+def _get_conversion_webhook_pair(app_index: int) -> Tuple[Optional[str], Optional[str]]:
+    """URL + secret for app 1 or 2 from env, else Secret Manager."""
+    assert app_index in (1, 2)
+    url_env = f"REPLIT_CONVERSION_WEBHOOK_{app_index}_URL"
+    sec_env = f"REPLIT_CONVERSION_WEBHOOK_{app_index}_SECRET"
+    url = os.getenv(url_env)
+    secret = os.getenv(sec_env)
+    if url and secret:
+        return url.strip(), secret.strip()
+
+    project_id = os.getenv("GCP_PROJECT") or os.getenv("GOOGLE_CLOUD_PROJECT")
+    if not project_id:
+        return None, None
+
+    sm_url = f"replit-conversion-webhook-{app_index}-url"
+    sm_sec = f"replit-conversion-webhook-{app_index}-secret"
+    try:
+        from google.cloud import secretmanager
+        client = secretmanager.SecretManagerServiceClient()
+        if not url:
+            name = f"projects/{project_id}/secrets/{sm_url}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            url = response.payload.data.decode("UTF-8").strip()
+        if not secret:
+            name = f"projects/{project_id}/secrets/{sm_sec}/versions/latest"
+            response = client.access_secret_version(request={"name": name})
+            secret = response.payload.data.decode("UTF-8").strip()
+        if url and secret:
+            logger.info("Retrieved Replit conversion webhook %s from Secret Manager", app_index)
+        return url or None, secret or None
+    except Exception as e:
+        logger.debug("Replit conversion webhook %s not in Secret Manager: %s", app_index, e)
+        return url or None, secret or None
+
+
+def get_conversion_webhook_configs() -> List[Tuple[str, str, int]]:
+    """Return [(url, secret, app_index), ...] for each configured app (1 and/or 2)."""
+    out: List[Tuple[str, str, int]] = []
+    for idx in (1, 2):
+        u, s = _get_conversion_webhook_pair(idx)
+        if u and s:
+            out.append((u, s, idx))
+    return out
+
+
+def preload_replit_conversion_webhook_env() -> None:
+    """
+    Load REPLIT_CONVERSION_WEBHOOK_{1,2}_URL/_SECRET from Secret Manager into os.environ
+    when missing, so configuration is fixed before Stripe/AutoCare sync and leads MERGE.
+    """
+    for idx in (1, 2):
+        url_env = f"REPLIT_CONVERSION_WEBHOOK_{idx}_URL"
+        sec_env = f"REPLIT_CONVERSION_WEBHOOK_{idx}_SECRET"
+        if os.getenv(url_env) and os.getenv(sec_env):
+            continue
+        u, s = _get_conversion_webhook_pair(idx)
+        if u and not os.getenv(url_env):
+            os.environ[url_env] = u
+        if s and not os.getenv(sec_env):
+            os.environ[sec_env] = s
+
+
+def _lead_row_json_safe(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialize BigQuery row values for JSON POST."""
+    out: Dict[str, Any] = {}
+    for k, v in row.items():
+        if v is None:
+            out[k] = None
+        elif isinstance(v, Decimal):
+            out[k] = float(v)
+        elif hasattr(v, "isoformat") and callable(v.isoformat):
+            try:
+                out[k] = v.isoformat()
+            except (TypeError, AttributeError):
+                out[k] = v
+        else:
+            out[k] = v
+    return out
+
+
+def _post_leads_enrichment_payload(url: str, secret: str, leads: List[Dict[str, Any]]) -> bool:
+    payload = {
+        "event": "leads_enriched",
+        "sent_at": datetime.utcnow().replace(microsecond=0).isoformat() + "Z",
+        "leads": [_lead_row_json_safe(lead) for lead in leads],
+    }
+    headers = {
+        "Content-Type": "application/json",
+        HEADER_SECRET: secret,
+        "Authorization": f"Bearer {secret}",
+    }
+    try:
+        response = requests.post(
+            url, json=payload, headers=headers, timeout=REPLIT_LEADS_WEBHOOK_TIMEOUT_S
+        )
+        response.raise_for_status()
+        return True
+    except requests.exceptions.RequestException as e:
+        logger.warning("Replit leads webhook POST failed (%s): %s", url, e)
+        return False
+
+
+def notify_replit_enriched_leads(leads: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    POST enriched lead rows to each configured Replit app (same payload to both URLs).
+    Failures are per-app; one failing backend does not skip the other.
+
+    Configure REPLIT_CONVERSION_WEBHOOK_1_URL/_SECRET and/or _2_* (or Secret Manager
+    replit-conversion-webhook-{1,2}-url / -secret). If none configured, returns skipped.
+    """
+    configs = get_conversion_webhook_configs()
+    if not configs:
+        logger.info(
+            "Replit leads webhooks not configured "
+            "(set REPLIT_CONVERSION_WEBHOOK_1_URL/_SECRET and/or _2_*, or Secret Manager)"
+        )
+        return {"status": "skipped", "message": "no leads webhooks configured", "leads_in_batch": len(leads)}
+
+    if not leads:
+        return {"status": "success", "message": "no leads to send", "apps": {}}
+
+    summary: Dict[str, Any] = {"status": "success", "leads_in_batch": len(leads), "apps": {}}
+    for url, secret, app_idx in configs:
+        key = f"app_{app_idx}"
+        total_sent = 0
+        ok_all = True
+        for i in range(0, len(leads), MAX_LEADS_PER_REPLIT_REQUEST):
+            chunk = leads[i : i + MAX_LEADS_PER_REPLIT_REQUEST]
+            if not _post_leads_enrichment_payload(url, secret, chunk):
+                ok_all = False
+                break
+            total_sent += len(chunk)
+
+        if ok_all:
+            summary["apps"][key] = {"sent": total_sent, "ok": True}
+            logger.info("Replit leads webhook app %s: sent %s leads", app_idx, total_sent)
+        else:
+            summary["apps"][key] = {"sent": total_sent, "ok": False}
+            summary["status"] = "partial"
+
+    return summary

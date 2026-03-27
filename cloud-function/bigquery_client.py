@@ -731,7 +731,20 @@ class BigQueryClient:
           SELECT * FROM enriched
         ) AS source
         ON target.uuid = source.uuid
-        WHEN MATCHED THEN UPDATE SET
+        WHEN MATCHED AND (
+          target.stripe_customer_id IS DISTINCT FROM source.customer_id
+          OR target.stripe_customer_created IS DISTINCT FROM source.stripe_customer_created
+          OR target.stripe_subscription_id IS DISTINCT FROM source.subscription_id
+          OR target.stripe_subscription_status IS DISTINCT FROM source.subscription_status
+          OR target.stripe_plan_name IS DISTINCT FROM source.plan_name
+          OR target.stripe_product_id IS DISTINCT FROM source.product_id
+          OR target.stripe_amount IS DISTINCT FROM source.amount
+          OR target.stripe_currency IS DISTINCT FROM source.currency
+          OR target.stripe_subscription_interval IS DISTINCT FROM source.subscription_interval
+          OR target.stripe_current_period_start IS DISTINCT FROM source.current_period_start
+          OR target.stripe_current_period_end IS DISTINCT FROM source.current_period_end
+          OR target.stripe_matched_on IS DISTINCT FROM source.matched_on
+        ) THEN UPDATE SET
           target.stripe_customer_id            = source.customer_id,
           target.stripe_customer_created       = source.stripe_customer_created,
           target.stripe_subscription_id        = source.subscription_id,
@@ -748,14 +761,44 @@ class BigQueryClient:
         """
 
         try:
+            ts_row = next(iter(self.client.query("SELECT CURRENT_TIMESTAMP() AS t_start").result()))
+            t_start = ts_row["t_start"]
+
             job = self.client.query(merge_query)
-            result = job.result()
+            job.result()
             rows_affected = job.num_dml_affected_rows or 0
             logger.info(f"Leads enrichment: {rows_affected} leads updated with Stripe data")
-            return {"status": "success", "leads_updated": rows_affected}
+
+            enriched_rows: List[Dict[str, Any]] = []
+            if (rows_affected or 0) > 0:
+                fetch_query = f"""
+                SELECT
+                  id, uuid, name, email, phone, customData, whatsappConsent, isUsed, usedAt,
+                  usedByEmployeeId, createdAt, offerId, offerName, promotionName, brandName, syncedAt,
+                  stripe_customer_id, stripe_customer_created, stripe_subscription_id,
+                  stripe_subscription_status, stripe_plan_name, stripe_product_id,
+                  stripe_amount, stripe_currency, stripe_subscription_interval,
+                  stripe_current_period_start, stripe_current_period_end, stripe_matched_at, stripe_matched_on,
+                  replit_conversion_webhook_1_sent_at, replit_conversion_webhook_2_sent_at
+                FROM `{p}.{pa}.leads`
+                WHERE stripe_matched_at >= @t_start
+                """
+                job_config = bigquery.QueryJobConfig(
+                    query_parameters=[
+                        bigquery.ScalarQueryParameter("t_start", "TIMESTAMP", t_start),
+                    ]
+                )
+                fetch_job = self.client.query(fetch_query, job_config=job_config)
+                enriched_rows = [{k: r[k] for k in r.keys()} for r in fetch_job.result()]
+
+            return {
+                "status": "success",
+                "leads_updated": rows_affected or 0,
+                "enriched_leads": enriched_rows,
+            }
         except Exception as e:
             logger.error(f"Failed to update leads with Stripe data: {e}", exc_info=True)
-            return {"status": "failed", "error": str(e), "leads_updated": 0}
+            return {"status": "failed", "error": str(e), "leads_updated": 0, "enriched_leads": []}
 
     # ---------- Unified and BI tables (run after all Stripe + AutoCare syncs) ----------
 

@@ -124,6 +124,11 @@ jobs:
           echo "--- Running sql/alter_leads_add_stripe_columns.sql ---"
           bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < sql/alter_leads_add_stripe_columns.sql
 
+      - name: Migrate promoapp.leads — add Replit webhook columns
+        run: |
+          echo "--- Running sql/alter_leads_add_replit_webhook_columns.sql ---"
+          bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} < sql/alter_leads_add_replit_webhook_columns.sql
+
       - name: Add brand column to marketing_sessions if missing
         run: |
           bq query --use_legacy_sql=false --project_id=${{ env.PROJECT_ID }} \
